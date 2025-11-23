@@ -8,7 +8,7 @@ Key features:
 - Modular generators for each domain (customers, subscriptions, plans, invoices, topups, support, cdr)
 - Fully configurable via `src/config.py`
 - Churn simulation controlled by a flag (apply_churn = True/False)
-- Scales to 1M+ customers (use PySpark/Dask if you need distributed generation)
+- Scales to 1M+ customers
 - Outputs Parquet files and small CSV samples
 - Detailed code comments and explanations throughout
 
