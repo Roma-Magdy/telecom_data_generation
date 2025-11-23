@@ -1,12 +1,8 @@
 """
 Orchestration script for the Telecom Synthetic Data Generator (chunked version).
 
-Usage (from repo root):
+Usage:
   python -m src.main --output-dir ./output --n-customers 1000000 --apply-churn --months-cdr 1
-
-Notes:
-  - This version generates customers in chunks to avoid memory issues.
-  - Each chunk is saved immediately to disk.
 """
 
 import os
@@ -34,7 +30,8 @@ from src.generators import cdr as gen_cdr
 @click.option("--months-cdr", default=1, type=int, help="Number of months to simulate CDR events per subscription")
 @click.option("--chunk-size", default=100_000, type=int, help="Number of customers per chunk")
 def main(output_dir, n_customers, apply_churn, months_cdr, chunk_size):
-    # Make sure we run from project root
+
+    # Ensure project root is in sys.path
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
@@ -53,98 +50,107 @@ def main(output_dir, n_customers, apply_churn, months_cdr, chunk_size):
 
     total_chunks = math.ceil(n_customers / chunk_size)
 
-    # Store batch file paths for optional concatenation later
-    customer_files = []
-    subscription_files = []
-    plans_files = []
-    subscription_plans_files = []
-    invoices_files = []
-    topups_files = []
-    tickets_files = []
-    cdr_files = []
-
     for chunk_idx in range(total_chunks):
         start_idx = chunk_idx * chunk_size
         current_chunk_size = min(chunk_size, n_customers - start_idx)
-        print(f"\nGenerating chunk {chunk_idx + 1}/{total_chunks}: customers {start_idx + 1} to {start_idx + current_chunk_size}")
+        print(f"\nGenerating chunk {chunk_idx+1}/{total_chunks}: customers {start_idx+1} to {start_idx+current_chunk_size}")
 
-        # ---------- Customers ----------
+        # ----- CUSTOMERS -----
         customers_df = gen_customers.generate_customers(current_chunk_size)
 
-        # ---------- Subscriptions ----------
+        # ----- SUBSCRIPTIONS -----
         subscriptions_df = gen_subs.generate_subscriptions(customers_df)
 
-        # ---------- Plans ----------
-        plans_df, subscription_plans_df = gen_plans.generate_plans_and_subscription_plans(subscriptions_df, customers_df)
+        # ----- PLANS + SUBSCRIPTION_PLANS -----
+        plans_df, subscription_plans_df = gen_plans.generate_plans_and_subscription_plans(
+            subscriptions_df,
+            customers_df
+        )
 
-        # ---------- Apply churn ----------
+        # ----- CHURN -----
         if apply_churn:
             subs = subscriptions_df.copy()
             monthly_p = config.MONTHLY_CHURN
 
-            # Vectorized churn simulation
             mask_active = subs.subscription_end_date.isna()
             random_vals = np.random.random(len(subs))
             churn_idx = subs.index[mask_active & (random_vals < monthly_p)]
+
             start_dates = pd.to_datetime(subs.loc[churn_idx, "subscription_start_date"])
-            end_dates = [utils.random_date_between(sd.to_pydatetime(), pd.Timestamp.now().to_pydatetime()) for sd in start_dates]
+            end_dates = [
+                utils.random_date_between(sd.to_pydatetime(), pd.Timestamp.now().to_pydatetime())
+                for sd in start_dates
+            ]
             subs.loc[churn_idx, "subscription_end_date"] = pd.to_datetime(end_dates).date
+
             subscriptions_df = subs
 
-            # Update customer status
-            active_counts = subscriptions_df[subscriptions_df.subscription_end_date.isna()].groupby("customer_id").size()
+            # Update customer status (1 active, 0 churned)
+            active_counts = subscriptions_df[subscriptions_df.subscription_end_date.isna()] \
+                                .groupby("customer_id").size()
             customers_df["status"] = 1
-            churned_customers = set(customers_df.customer_id) - set(active_counts.index)
-            customers_df.loc[customers_df.customer_id.isin(list(churned_customers)), "status"] = 0
+            churned = set(customers_df.customer_id) - set(active_counts.index)
+            customers_df.loc[customers_df.customer_id.isin(list(churned)), "status"] = 0
 
-        # ---------- Invoices ----------
-        invoices_df = gen_invoices.generate_invoices(subscriptions_df, plans_df, customers_df)
+        # ----- INVOICES -----
+        # Pass subscription_plans_df to properly match plans to subscriptions
+        invoices_df = gen_invoices.generate_invoices(
+            subscriptions_df,
+            plans_df,
+            subscription_plans_df
+        )
 
-        # ---------- Topups ----------
+        # ----- TOPUPS -----
         topups_df = gen_topups.generate_topups(subscriptions_df)
 
-        # ---------- Support Tickets ----------
+        # ----- SUPPORT TICKETS -----
         tickets_df = gen_tickets.generate_support_tickets(subscriptions_df)
 
-        # ---------- CDR ----------
+        # ----- CDR -----
         cdr_df = gen_cdr.generate_cdr(subscriptions_df, months=months_cdr)
 
-        # ---------- Write batch to disk ----------
+        # ----- SAVE CHUNK -----
         def write_batch(df: pd.DataFrame, name: str):
             if df is None or len(df) == 0:
-                print(f"Warning: empty dataframe for {name}, skipping write.")
-                return None
-            batch_file = os.path.join(output_dir, f"{name}_chunk{chunk_idx + 1}.parquet")
-            df.to_parquet(batch_file, index=False)
-            print(f"Wrote {name} chunk -> {batch_file} (rows={len(df)})")
-            return batch_file
+                print(f"[WARN] empty dataframe for {name}, skipping write.")
+                return
+            path = os.path.join(output_dir, f"{name}_chunk{chunk_idx+1}.parquet")
+            df.to_parquet(path, index=False)
+            print(f"Wrote {name} chunk -> {path} (rows={len(df)})")
 
-        customer_files.append(write_batch(customers_df, "customers"))
-        subscription_files.append(write_batch(subscriptions_df, "subscriptions"))
-        plans_files.append(write_batch(plans_df, "plans"))
-        subscription_plans_files.append(write_batch(subscription_plans_df, "subscription_plans"))
-        invoices_files.append(write_batch(invoices_df, "invoices"))
-        topups_files.append(write_batch(topups_df, "topups"))
-        tickets_files.append(write_batch(tickets_df, "support_tickets"))
-        cdr_files.append(write_batch(cdr_df, "cdr"))
+        write_batch(customers_df, "customers")
+        write_batch(subscriptions_df, "subscriptions")
+        write_batch(plans_df, "plans")
+        write_batch(subscription_plans_df, "subscription_plans")
+        write_batch(invoices_df, "invoices")
+        write_batch(topups_df, "topups")
+        write_batch(tickets_df, "support_tickets")
+        write_batch(cdr_df, "cdr")
 
-    print("\nGeneration complete. All chunks written to disk.")
+    print("\nGeneration complete.")
 
-    # Optional CSV samples (from the last chunk only)
+    # ----- OPTIONAL CSV SAMPLES -----
     if config.WRITE_CSV_SAMPLE:
         sample_dir = os.path.join(output_dir, "samples")
         os.makedirs(sample_dir, exist_ok=True)
-        sample_count = min(len(customers_df), config.CSV_SAMPLE_SIZE)
-        customers_df.sample(sample_count).to_csv(os.path.join(sample_dir, "customers_sample.csv"), index=False)
-        subscriptions_df.sample(sample_count).to_csv(os.path.join(sample_dir, "subscriptions_sample.csv"), index=False)
-        plans_df.sample(sample_count).to_csv(os.path.join(sample_dir, "plans_sample.csv"), index=False)
-        subscription_plans_df.sample(sample_count).to_csv(os.path.join(sample_dir, "subscription_plans_sample.csv"), index=False)
-        invoices_df.sample(sample_count).to_csv(os.path.join(sample_dir, "invoices_sample.csv"), index=False)
-        topups_df.sample(sample_count).to_csv(os.path.join(sample_dir, "topups_sample.csv"), index=False)
-        tickets_df.sample(sample_count).to_csv(os.path.join(sample_dir, "support_tickets_sample.csv"), index=False)
-        cdr_df.sample(sample_count).to_csv(os.path.join(sample_dir, "cdr_sample.csv"), index=False)
-        print(f"Wrote CSV samples ({sample_count} rows each) in {sample_dir}")
+        sample_count = config.CSV_SAMPLE_SIZE
+
+        def safe_sample(df):
+            if df is None or len(df) == 0:
+                return pd.DataFrame()
+            return df.sample(min(sample_count, len(df)))
+
+        safe_sample(customers_df).to_csv(os.path.join(sample_dir, "customers_sample.csv"), index=False)
+        safe_sample(subscriptions_df).to_csv(os.path.join(sample_dir, "subscriptions_sample.csv"), index=False)
+        safe_sample(plans_df).to_csv(os.path.join(sample_dir, "plans_sample.csv"), index=False)
+        safe_sample(subscription_plans_df).to_csv(os.path.join(sample_dir, "subscription_plans_sample.csv"), index=False)
+        safe_sample(invoices_df).to_csv(os.path.join(sample_dir, "invoices_sample.csv"), index=False)
+        safe_sample(topups_df).to_csv(os.path.join(sample_dir, "topups_sample.csv"), index=False)
+        safe_sample(tickets_df).to_csv(os.path.join(sample_dir, "support_tickets_sample.csv"), index=False)
+        safe_sample(cdr_df).to_csv(os.path.join(sample_dir, "cdr_sample.csv"), index=False)
+
+        print(f"Wrote CSV samples ({sample_count} rows max) → {sample_dir}")
 
 
-if __name__ == "_main_":
+if __name__ == "__main__":
     main()
