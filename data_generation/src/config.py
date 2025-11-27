@@ -73,7 +73,7 @@ MONTHLY_CHURN = monthly_churn_from_annual(BASE_ANNUAL_CHURN)
 
 
 # CDR & usage modeling parameters (tunable)
-CDR_MEAN_EVENTS_PER_SUB_PER_MONTH = 20 # Poisson mean events per subscription per month (adjustable)
+CDR_MEAN_EVENTS_PER_SUB_PER_MONTH = 4 # Poisson mean events per subscription per month (adjustable)
 
 # Output options
 DEFAULT_OUTPUT_DIR = "./output"
